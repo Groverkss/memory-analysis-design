@@ -36,6 +36,7 @@ echo "Host:       $HOSTNAME"
 echo "GPU:        $GPU_NAME ($GPU_ARCH)"
 echo "ROCm:       $ROCM_VERSION"
 echo "hipcc:      $HIPCC_VERSION"
+echo "Config:     50 iterations per kernel, median reported, cache flushed between iterations"
 echo "Output:     $OUTFILE"
 echo ""
 
@@ -46,25 +47,9 @@ make GPU_ARCH="$GPU_ARCH" HIPCC="$HIPCC" 2>&1
 echo ""
 
 # --- Run ---
-echo "Running benchmark (3 runs, taking best)..."
-BEST_FILE=$(mktemp)
-
-for run in 1 2 3; do
-  echo "  Run $run/3..."
-  TMPFILE=$(mktemp)
-  ./coalesce_bench > "$TMPFILE" 2>&1
-  # Keep the run with highest first coalesced_load bandwidth as "best"
-  if [[ $run -eq 1 ]]; then
-    cp "$TMPFILE" "$BEST_FILE"
-  else
-    OLD_BW=$(grep "coalesced_load<1>" "$BEST_FILE" | awk '{print $NF}')
-    NEW_BW=$(grep "coalesced_load<1>" "$TMPFILE" | awk '{print $NF}')
-    if awk "BEGIN {exit !($NEW_BW > $OLD_BW)}"; then
-      cp "$TMPFILE" "$BEST_FILE"
-    fi
-  fi
-  rm -f "$TMPFILE"
-done
+echo "Running benchmark..."
+TMPFILE=$(mktemp)
+./coalesce_bench > "$TMPFILE" 2>&1
 
 # --- Write output ---
 {
@@ -74,11 +59,12 @@ done
   echo "GPU:        $GPU_NAME ($GPU_ARCH)"
   echo "ROCm:       $ROCM_VERSION"
   echo "hipcc:      $HIPCC_VERSION"
+  echo "Config:     50 iterations per kernel, median reported, cache flushed between iterations"
   echo ""
-  cat "$BEST_FILE"
+  cat "$TMPFILE"
 } > "$OUTFILE"
 
-rm -f "$BEST_FILE"
+rm -f "$TMPFILE"
 
 echo ""
 echo "Results written to $OUTFILE"
