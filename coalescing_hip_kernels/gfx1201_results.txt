@@ -1,52 +1,47 @@
 === Coalescing Benchmark Results ===
-Date:       2026-03-26 10:58:37 UTC
+Date:       2026-03-26 12:09:31 UTC
 Host:       tiny
 GPU:        AMD Radeon RX 9070 XT (gfx1201)
 ROCm:       6.4.2-120
 hipcc:      HIP version: 6.4.43484-123eb5128
 Config:     50 iterations per kernel, median reported, cache flushed between iterations
 
+GPU: AMD Radeon RX 9070 XT
+CUs: 32, subgroup size: 32
+Block sizes: 128, 256
+Unroll factors: 1-8 (best selected automatically)
 
-Element type: f32 (4 bytes)
-Buffer: 256 MB (64M floats)
-Block size: 256 threads, Iterations: 50 (median reported)
+Buffer: 2048 MB (512 M floats)
+Iterations: 50 per config (median), cache flushed between iterations
 
-Kernel                                       Median        Min        Max
----------------------------------------- ---------- ---------- ----------
+Running benchmarks (sweeping block sizes and unroll factors)...
 
-  == COALESCED LOADS (contiguous f32s per thread) ==
-  1x f32 = 1*4B contiguous                  284.9    283.1    285.3
-  2x f32 = 2*4B contiguous                  347.0    343.5    353.2
-  4x f32 = 4*4B contiguous                  404.7    404.2    410.0
-  8x f32 = 8*4B contiguous                  440.1    436.0    440.5
-  16x f32 = 16*4B contiguous                454.5    453.7    462.0
+Kernel                                         GB/s    Block   Unroll
+---------------------------------------- ---------- -------- --------
 
-  == GAPPED LOADS (strided f32s per thread) ==
-  1x f32 stride=2 (1*4B/thread)             173.5    172.2    175.5
-  1x f32 stride=4 (1*4B/thread)             101.2    101.1    102.5
-  1x f32 stride=32 (1*4B/thread)             14.3     14.3     14.4
-  2x f32 stride=2 (2*4B/thread)             202.3    200.7    202.6
-  2x f32 stride=4 (2*4B/thread)             110.0    109.3    111.7
-  2x f32 stride=32 (2*4B/thread)             14.5     14.5     14.8
-  4x f32 stride=2 (4*4B/thread)             220.0    219.2    220.3
-  4x f32 stride=4 (4*4B/thread)             113.6    112.6    115.2
-  4x f32 stride=32 (4*4B/thread)             14.6     14.4     14.8
+  == COALESCED LOADS ==
+  float   (b32)  load+reduce                616.8      128        4
+  float2  (b64)  load+reduce                616.9      128        4
+  float4  (b128) load+reduce                617.2      128        2
 
-  == COALESCED STORES (contiguous f32s per thread) ==
-  1x f32 = 1*4B contiguous                  619.1    611.5    619.7
-  2x f32 = 2*4B contiguous                  624.6    623.7    625.1
-  4x f32 = 4*4B contiguous                  627.1    619.5    627.7
-  8x f32 = 8*4B contiguous                  627.4    626.4    628.4
-  16x f32 = 16*4B contiguous                626.6    620.4    628.0
+  == GAPPED LOADS ==
+  float  stride=2                           308.5      128        2
+  float  stride=4                           154.3      128        2
+  float  stride=32                           19.3      128        1
+  float4 stride=2                           308.6      128        1
+  float4 stride=4                           154.2      128        1
+  float4 stride=32                           37.0      128        1
 
-  == GAPPED STORES (strided f32s per thread) ==
-  1x f32 stride=2 (1*4B/thread)             125.7    125.0    126.8
-  1x f32 stride=4 (1*4B/thread)              62.9     62.6     63.1
-  1x f32 stride=32 (1*4B/thread)             46.1     43.7     47.5
-  2x f32 stride=2 (2*4B/thread)             125.7    125.0    126.0
-  2x f32 stride=4 (2*4B/thread)              62.5     62.1     62.7
-  2x f32 stride=32 (2*4B/thread)             39.1     38.2     40.8
-  4x f32 stride=2 (4*4B/thread)             124.9    124.4    125.2
-  4x f32 stride=4 (4*4B/thread)              62.3     62.0     62.7
-  4x f32 stride=32 (4*4B/thread)             36.4     36.0     36.9
+  == COALESCED STORES ==
+  float   (b32)  store iota                 623.1      128        1
+  float2  (b64)  store iota                 611.7      128        1
+  float4  (b128) store iota                 621.4      128        1
+
+  == GAPPED STORES ==
+  float  stride=2                           125.3      128        1
+  float  stride=4                            62.6      128        1
+  float  stride=32                           31.6      128        4
+  float4 stride=2                           125.2      128        1
+  float4 stride=4                           153.4      256        2
+  float4 stride=32                           79.0      128        4
 

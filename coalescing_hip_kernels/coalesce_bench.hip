@@ -1,12 +1,20 @@
 // Coalescing benchmark
-// Tests load/store bandwidth with varying elements-per-thread and gap patterns.
 //
-// Each kernel processes a buffer of N floats. We launch enough threads so that
-// every element is touched exactly once (coalesced) or with a known stride
-// (gapped). We measure effective bandwidth = bytes_moved / time.
+// Tests load/store bandwidth with varying vector widths and gap patterns.
+// For each kernel type, sweeps block sizes (subgroup*4, subgroup*8) and
+// unroll factors (1-8), reports the best configuration.
+//
+// Load kernels: grid-stride loop, batch reduce into register accumulators.
+// Store kernels: grid-stride loop, write iota (dst[i] = i).
+//
+// Vector widths (128-bit max = coalescing limit for f32):
+//   float   = 1x f32 =  4B  -> global_load_b32
+//   float2  = 2x f32 =  8B  -> global_load_b64
+//   float4  = 4x f32 = 16B  -> global_load_b128
 
 #include <hip/hip_runtime.h>
 #include <algorithm>
+#include <cfloat>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,9 +31,7 @@
   } while (0)
 
 // ---------------------------------------------------------------------------
-// Cache flush: write garbage to a separate buffer that's large enough to
-// evict all L1/L2 contents. MI300X has 256MB L2, RDNA4 has 64MB L2.
-// We use 512MB to be safe on all targets.
+// Cache flush
 // ---------------------------------------------------------------------------
 static float *d_flush = nullptr;
 static const size_t FLUSH_BYTES = 512ULL * 1024 * 1024;
@@ -45,131 +51,351 @@ static void flush_cache() {
 }
 
 // ---------------------------------------------------------------------------
-// Coalesced load: each thread loads EPT contiguous elements, accumulates them,
-// and writes one result to prevent dead-code elimination.
-// Thread i reads elements [i*EPT, i*EPT + EPT).
+// Coalesced load kernels — templated on UNROLL.
+// Grid-stride loop with UNROLL independent accumulators.
 // ---------------------------------------------------------------------------
-template <int EPT>
-__global__ void coalesced_load(const float *__restrict__ src,
-                               float *__restrict__ dst, int n) {
+
+template <int UNROLL>
+__global__ void coalesced_load_f32(const float *__restrict__ src,
+                                   float *__restrict__ dst, int n) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int base = tid * EPT;
-  if (base + EPT > n) return;
-  float acc = 0.0f;
-  #pragma unroll
-  for (int i = 0; i < EPT; ++i)
-    acc += src[base + i];
-  dst[tid] = acc;
-}
-
-// ---------------------------------------------------------------------------
-// Gapped load: each thread loads EPT elements with a stride of GAP between
-// them. Thread i reads elements [i*EPT*GAP, ...] stepping by GAP.
-// This creates intra-warp gaps — consecutive threads still start at adjacent
-// EPT*GAP blocks, but within each thread the accesses are strided.
-// ---------------------------------------------------------------------------
-template <int EPT, int GAP>
-__global__ void gapped_load(const float *__restrict__ src,
-                            float *__restrict__ dst, int n) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int base = tid * EPT * GAP;
-  if (base + (EPT - 1) * GAP >= n) return;
-  float acc = 0.0f;
-  #pragma unroll
-  for (int i = 0; i < EPT; ++i)
-    acc += src[base + i * GAP];
-  dst[tid] = acc;
-}
-
-// ---------------------------------------------------------------------------
-// Coalesced store: each thread writes EPT contiguous elements.
-// Thread i writes to [i*EPT, i*EPT + EPT).
-// ---------------------------------------------------------------------------
-template <int EPT>
-__global__ void coalesced_store(float *__restrict__ dst, int n) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int base = tid * EPT;
-  if (base + EPT > n) return;
-  float val = (float)tid;
-  #pragma unroll
-  for (int i = 0; i < EPT; ++i)
-    dst[base + i] = val + (float)i;
-}
-
-// ---------------------------------------------------------------------------
-// Gapped store: each thread writes EPT elements with stride GAP.
-// ---------------------------------------------------------------------------
-template <int EPT, int GAP>
-__global__ void gapped_store(float *__restrict__ dst, int n) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int base = tid * EPT * GAP;
-  if (base + (EPT - 1) * GAP >= n) return;
-  float val = (float)tid;
-  #pragma unroll
-  for (int i = 0; i < EPT; ++i)
-    dst[base + i * GAP] = val + (float)i;
-}
-
-// ---------------------------------------------------------------------------
-// Benchmark harness — runs ITERS individual timed launches, takes median.
-// Flushes cache before each iteration.
-// ---------------------------------------------------------------------------
-
-struct BenchResult {
-  const char *name;
-  double median_gb_per_sec;
-  double min_gb_per_sec;
-  double max_gb_per_sec;
-};
-
-template <typename KernelFn>
-BenchResult bench_kernel(const char *name, KernelFn fn, int grid, int block,
-                         int warmup, int iters, size_t bytes_moved) {
-  std::vector<double> samples(iters);
-
-  // Warmup (no cache flush — just get the GPU clocks up)
-  for (int i = 0; i < warmup; ++i) {
-    fn(grid, block);
+  int stride = gridDim.x * blockDim.x;
+  float acc[UNROLL];
+  for (int u = 0; u < UNROLL; ++u) acc[u] = 0.0f;
+  int i = tid;
+  for (; i + (UNROLL - 1) * stride < n; i += UNROLL * stride) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u)
+      acc[u] += src[i + u * stride];
   }
+  for (; i < n; i += stride)
+    acc[0] += src[i];
+  float total = 0.0f;
+  for (int u = 0; u < UNROLL; ++u) total += acc[u];
+  dst[tid] = total;
+}
+
+template <int UNROLL>
+__global__ void coalesced_load_f32x2(const float2 *__restrict__ src,
+                                     float *__restrict__ dst, int n2) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  float acc[UNROLL];
+  for (int u = 0; u < UNROLL; ++u) acc[u] = 0.0f;
+  int i = tid;
+  for (; i + (UNROLL - 1) * stride < n2; i += UNROLL * stride) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u) {
+      float2 v = src[i + u * stride];
+      acc[u] += v.x + v.y;
+    }
+  }
+  for (; i < n2; i += stride) {
+    float2 v = src[i];
+    acc[0] += v.x + v.y;
+  }
+  float total = 0.0f;
+  for (int u = 0; u < UNROLL; ++u) total += acc[u];
+  dst[tid] = total;
+}
+
+template <int UNROLL>
+__global__ void coalesced_load_f32x4(const float4 *__restrict__ src,
+                                     float *__restrict__ dst, int n4) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  float acc[UNROLL];
+  for (int u = 0; u < UNROLL; ++u) acc[u] = 0.0f;
+  int i = tid;
+  for (; i + (UNROLL - 1) * stride < n4; i += UNROLL * stride) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u) {
+      float4 v = src[i + u * stride];
+      acc[u] += v.x + v.y + v.z + v.w;
+    }
+  }
+  for (; i < n4; i += stride) {
+    float4 v = src[i];
+    acc[0] += v.x + v.y + v.z + v.w;
+  }
+  float total = 0.0f;
+  for (int u = 0; u < UNROLL; ++u) total += acc[u];
+  dst[tid] = total;
+}
+
+// ---------------------------------------------------------------------------
+// Gapped load kernels
+// ---------------------------------------------------------------------------
+
+template <int UNROLL, int GAP>
+__global__ void gapped_load_f32(const float *__restrict__ src,
+                                float *__restrict__ dst, int n) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int step = gridDim.x * blockDim.x * GAP;
+  float acc[UNROLL];
+  for (int u = 0; u < UNROLL; ++u) acc[u] = 0.0f;
+  int i = tid * GAP;
+  for (; i + (UNROLL - 1) * step < n; i += UNROLL * step) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u)
+      acc[u] += src[i + u * step];
+  }
+  for (; i < n; i += step)
+    acc[0] += src[i];
+  float total = 0.0f;
+  for (int u = 0; u < UNROLL; ++u) total += acc[u];
+  dst[tid] = total;
+}
+
+template <int UNROLL, int GAP>
+__global__ void gapped_load_f32x4(const float4 *__restrict__ src,
+                                  float *__restrict__ dst, int n4) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int step = gridDim.x * blockDim.x * GAP;
+  float acc[UNROLL];
+  for (int u = 0; u < UNROLL; ++u) acc[u] = 0.0f;
+  int i = tid * GAP;
+  for (; i + (UNROLL - 1) * step < n4; i += UNROLL * step) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u) {
+      float4 v = src[i + u * step];
+      acc[u] += v.x + v.y + v.z + v.w;
+    }
+  }
+  for (; i < n4; i += step) {
+    float4 v = src[i];
+    acc[0] += v.x + v.y + v.z + v.w;
+  }
+  float total = 0.0f;
+  for (int u = 0; u < UNROLL; ++u) total += acc[u];
+  dst[tid] = total;
+}
+
+// ---------------------------------------------------------------------------
+// Coalesced store kernels — write iota: dst[i] = i.
+// ---------------------------------------------------------------------------
+
+template <int UNROLL>
+__global__ void coalesced_store_f32(float *__restrict__ dst, int n) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  int i = tid;
+  for (; i + (UNROLL - 1) * stride < n; i += UNROLL * stride) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u)
+      dst[i + u * stride] = (float)(i + u * stride);
+  }
+  for (; i < n; i += stride)
+    dst[i] = (float)i;
+}
+
+template <int UNROLL>
+__global__ void coalesced_store_f32x2(float2 *__restrict__ dst, int n2) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  int i = tid;
+  for (; i + (UNROLL - 1) * stride < n2; i += UNROLL * stride) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u) {
+      int idx = i + u * stride;
+      int base = idx * 2;
+      dst[idx] = make_float2((float)base, (float)(base + 1));
+    }
+  }
+  for (; i < n2; i += stride) {
+    int base = i * 2;
+    dst[i] = make_float2((float)base, (float)(base + 1));
+  }
+}
+
+template <int UNROLL>
+__global__ void coalesced_store_f32x4(float4 *__restrict__ dst, int n4) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  int i = tid;
+  for (; i + (UNROLL - 1) * stride < n4; i += UNROLL * stride) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u) {
+      int idx = i + u * stride;
+      int base = idx * 4;
+      dst[idx] = make_float4((float)base, (float)(base + 1),
+                             (float)(base + 2), (float)(base + 3));
+    }
+  }
+  for (; i < n4; i += stride) {
+    int base = i * 4;
+    dst[i] = make_float4((float)base, (float)(base + 1),
+                         (float)(base + 2), (float)(base + 3));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Gapped store kernels
+// ---------------------------------------------------------------------------
+
+template <int UNROLL, int GAP>
+__global__ void gapped_store_f32(float *__restrict__ dst, int n) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int step = gridDim.x * blockDim.x * GAP;
+  int i = tid * GAP;
+  for (; i + (UNROLL - 1) * step < n; i += UNROLL * step) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u)
+      dst[i + u * step] = (float)(i + u * step);
+  }
+  for (; i < n; i += step)
+    dst[i] = (float)i;
+}
+
+template <int UNROLL, int GAP>
+__global__ void gapped_store_f32x4(float4 *__restrict__ dst, int n4) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int step = gridDim.x * blockDim.x * GAP;
+  int i = tid * GAP;
+  for (; i + (UNROLL - 1) * step < n4; i += UNROLL * step) {
+    #pragma unroll
+    for (int u = 0; u < UNROLL; ++u) {
+      int idx = i + u * step;
+      int base = idx * 4;
+      dst[idx] = make_float4((float)base, (float)(base + 1),
+                             (float)(base + 2), (float)(base + 3));
+    }
+  }
+  for (; i < n4; i += step) {
+    int base = i * 4;
+    dst[i] = make_float4((float)base, (float)(base + 1),
+                         (float)(base + 2), (float)(base + 3));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark harness
+// ---------------------------------------------------------------------------
+
+static const int WARMUP = 5;
+static const int ITERS = 50;
+
+// Returns median GB/s for a single (grid, block) configuration.
+template <typename KernelFn>
+double bench_one(KernelFn fn, int grid, int block, size_t bytes_moved) {
+  std::vector<double> samples(ITERS);
+
+  for (int i = 0; i < WARMUP; ++i)
+    fn(grid, block);
   HIP_CHECK(hipDeviceSynchronize());
 
   hipEvent_t start, stop;
   HIP_CHECK(hipEventCreate(&start));
   HIP_CHECK(hipEventCreate(&stop));
 
-  for (int i = 0; i < iters; ++i) {
-    // Flush cache before each iteration
+  for (int i = 0; i < ITERS; ++i) {
     flush_cache();
-
     HIP_CHECK(hipEventRecord(start));
     fn(grid, block);
     HIP_CHECK(hipEventRecord(stop));
     HIP_CHECK(hipEventSynchronize(stop));
-
     float ms = 0;
     HIP_CHECK(hipEventElapsedTime(&ms, start, stop));
-    double sec = (double)ms / 1000.0;
-    samples[i] = (double)bytes_moved / sec / 1e9;
+    samples[i] = (double)bytes_moved / ((double)ms / 1000.0) / 1e9;
   }
 
   HIP_CHECK(hipEventDestroy(start));
   HIP_CHECK(hipEventDestroy(stop));
 
   std::sort(samples.begin(), samples.end());
-  double median = samples[iters / 2];
-  double min_bw = samples[0];
-  double max_bw = samples[iters - 1];
-
-  return {name, median, min_bw, max_bw};
+  return samples[ITERS / 2];
 }
 
+struct BenchResult {
+  const char *name;
+  double best_gb_per_sec;
+  int best_block;
+  int best_unroll;
+};
+
+// Sweep block sizes and unroll factors, return best config.
+// block_sizes: array of block sizes to try.
+// For each (block, unroll), we compute num_blocks to fill the GPU.
+template <typename LaunchFn>
+BenchResult sweep(const char *name, LaunchFn launch_fn,
+                  const std::vector<int> &block_sizes, int num_cus,
+                  int n, size_t bytes_moved) {
+  double best_bw = 0;
+  int best_block = 0, best_unroll = 0;
+
+  for (int bs : block_sizes) {
+    // Target enough waves to fill the GPU: ~8 waves per CU.
+    int waves_per_block = bs / 64;  // conservative (wave64)
+    if (waves_per_block < 1) waves_per_block = 1;
+    int target_waves = num_cus * 8;
+    int num_blocks = (target_waves + waves_per_block - 1) / waves_per_block;
+    // Ensure we have enough blocks for the data.
+    // Grid-stride handles any N, but more blocks = better occupancy.
+    num_blocks = std::max(num_blocks, 256);
+
+    for (int unroll = 1; unroll <= 8; ++unroll) {
+      double bw = launch_fn(num_blocks, bs, unroll, n, bytes_moved);
+      if (bw > best_bw) {
+        best_bw = bw;
+        best_block = bs;
+        best_unroll = unroll;
+      }
+    }
+  }
+  return {name, best_bw, best_block, best_unroll};
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch helpers — runtime unroll -> compile-time template via switch.
+// Use hipLaunchKernelGGL to avoid <<<>>> parsing issues in templates.
+// ---------------------------------------------------------------------------
+
+#define DISPATCH_UNROLL(KERNEL, GRID, BLOCK, ...)                              \
+  do { switch (unroll) {                                                       \
+    case 1: hipLaunchKernelGGL(KERNEL<1>, GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 2: hipLaunchKernelGGL(KERNEL<2>, GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 3: hipLaunchKernelGGL(KERNEL<3>, GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 4: hipLaunchKernelGGL(KERNEL<4>, GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 5: hipLaunchKernelGGL(KERNEL<5>, GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 6: hipLaunchKernelGGL(KERNEL<6>, GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 7: hipLaunchKernelGGL(KERNEL<7>, GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 8: hipLaunchKernelGGL(KERNEL<8>, GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+  } } while(0)
+
+#define DISPATCH_UNROLL_GAP(KERNEL, GAP, GRID, BLOCK, ...)                     \
+  do { switch (unroll) {                                                       \
+    case 1: hipLaunchKernelGGL((KERNEL<1,GAP>), GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 2: hipLaunchKernelGGL((KERNEL<2,GAP>), GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 3: hipLaunchKernelGGL((KERNEL<3,GAP>), GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 4: hipLaunchKernelGGL((KERNEL<4,GAP>), GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 5: hipLaunchKernelGGL((KERNEL<5,GAP>), GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 6: hipLaunchKernelGGL((KERNEL<6,GAP>), GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 7: hipLaunchKernelGGL((KERNEL<7,GAP>), GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+    case 8: hipLaunchKernelGGL((KERNEL<8,GAP>), GRID, BLOCK, 0, 0, __VA_ARGS__); break; \
+  } } while(0)
+
 int main() {
-  // 256 MB buffer
-  const int N = 64 * 1024 * 1024;  // 64M floats = 256 MB
+  // Query device properties.
+  hipDeviceProp_t prop;
+  HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+  int subgroup_size = prop.warpSize;
+  int num_cus = prop.multiProcessorCount;
+
+  printf("GPU: %s\n", prop.name);
+  printf("CUs: %d, subgroup size: %d\n", num_cus, subgroup_size);
+
+  std::vector<int> block_sizes = {subgroup_size * 4, subgroup_size * 8};
+  printf("Block sizes: %d, %d\n", block_sizes[0], block_sizes[1]);
+  printf("Unroll factors: 1-8 (best selected automatically)\n\n");
+
+  // Buffer: ~2GB, divisible by largest block * 8 * 4 (float4).
+  int max_block = block_sizes.back();
+  int align = max_block * 8 * 4;  // block * max_unroll * float4_elems
+  const int N = ((512 * 1024 * 1024) / align) * align;  // ~2GB in floats
   const size_t bytes = (size_t)N * sizeof(float);
-  const int BLOCK = 256;
-  const int WARMUP = 10;
-  const int ITERS = 50;
+
+  printf("Buffer: %.0f MB (%d M floats)\n", (double)bytes / (1024*1024), N / (1024*1024));
+  printf("Iterations: %d per config (median), cache flushed between iterations\n\n", ITERS);
 
   float *d_src, *d_dst;
   HIP_CHECK(hipMalloc(&d_src, bytes));
@@ -180,120 +406,108 @@ int main() {
 
   std::vector<BenchResult> results;
 
-  auto run = [&](const char *name, auto launcher, int grid, size_t moved) {
-    auto r = bench_kernel(name, launcher, grid, BLOCK, WARMUP, ITERS, moved);
-    results.push_back(r);
-  };
+  // Helper macros: sweep block sizes and unroll factors for each kernel.
+  #define SWEEP_COAL_LOAD(NAME, VEC_TYPE, KERNEL, DIVISOR)                     \
+    results.push_back(sweep(NAME, [&](int nb, int bs, int unroll,              \
+                                      int n, size_t bm) -> double {            \
+      return bench_one([&](int g, int b) {                                     \
+        DISPATCH_UNROLL(KERNEL, dim3(g), dim3(b), (VEC_TYPE*)d_src, d_dst, n); \
+      }, nb, bs, bm);                                                          \
+    }, block_sizes, num_cus, N / DIVISOR, bytes))
 
-  // EPT = elements per thread. Each element is a f32 (4 bytes).
-  // EPT=1  -> each thread does 1x f32 load/store  =  4B  (global_load_b32)
-  // EPT=2  -> each thread does 2x f32 load/store  =  8B  (global_load_b64)
-  // EPT=4  -> each thread does 4x f32 load/store  = 16B  (global_load_b128)
-  // EPT=8  -> each thread does 8x f32 load/store  = 32B  (2x global_load_b128)
-  // EPT=16 -> each thread does 16x f32 load/store = 64B  (4x global_load_b128)
-  //
-  // GAP = stride between elements within a thread. GAP=1 is contiguous.
-  // GAP=2 means thread reads every other element (50% cache line utilization).
-  // GAP=32 means thread reads one element per cache line (worst case).
+  #define SWEEP_GAP_LOAD(NAME, KERNEL, GAP, BYTES_MOVED)                      \
+    results.push_back(sweep(NAME, [&](int nb, int bs, int unroll,              \
+                                      int n, size_t bm) -> double {            \
+      return bench_one([&](int g, int b) {                                     \
+        DISPATCH_UNROLL_GAP(KERNEL, GAP, dim3(g), dim3(b),                     \
+                            (const float*)d_src, d_dst, n);                    \
+      }, nb, bs, bm);                                                          \
+    }, block_sizes, num_cus, N, BYTES_MOVED))
 
-  // ---- Coalesced loads ----
-  // Each thread loads EPT contiguous f32s. Adjacent threads access adjacent
-  // blocks, so the entire warp's access pattern is fully coalesced.
-  #define BENCH_COAL_LOAD(EPT)                                                 \
-    run(#EPT "x f32 = " #EPT "*4B contiguous",                                \
-        [&](int g, int b) {                                                    \
-          coalesced_load<EPT><<<g, b>>>(d_src, d_dst, N);                      \
-        },                                                                     \
-        N / (EPT * BLOCK), bytes)
+  #define SWEEP_GAP_LOAD4(NAME, KERNEL, GAP, BYTES_MOVED)                     \
+    results.push_back(sweep(NAME, [&](int nb, int bs, int unroll,              \
+                                      int n, size_t bm) -> double {            \
+      return bench_one([&](int g, int b) {                                     \
+        DISPATCH_UNROLL_GAP(KERNEL, GAP, dim3(g), dim3(b),                     \
+                            (const float4*)d_src, d_dst, n);                   \
+      }, nb, bs, bm);                                                          \
+    }, block_sizes, num_cus, N / 4, BYTES_MOVED))
 
-  BENCH_COAL_LOAD(1);
-  BENCH_COAL_LOAD(2);
-  BENCH_COAL_LOAD(4);
-  BENCH_COAL_LOAD(8);
-  BENCH_COAL_LOAD(16);
+  #define SWEEP_COAL_STORE(NAME, VEC_TYPE, KERNEL, DIVISOR)                    \
+    results.push_back(sweep(NAME, [&](int nb, int bs, int unroll,              \
+                                      int n, size_t bm) -> double {            \
+      return bench_one([&](int g, int b) {                                     \
+        DISPATCH_UNROLL(KERNEL, dim3(g), dim3(b), (VEC_TYPE*)d_dst, n);        \
+      }, nb, bs, bm);                                                          \
+    }, block_sizes, num_cus, N / DIVISOR, bytes))
 
-  // ---- Gapped loads ----
-  // Each thread loads EPT f32s but with GAP elements between each access.
-  // E.g., EPT=2, GAP=4: thread reads src[base] and src[base+4], skipping 3.
-  #define BENCH_GAP_LOAD(EPT, GAP)                                             \
-    run(#EPT "x f32 stride=" #GAP " (" #EPT "*4B/thread)",                    \
-        [&](int g, int b) {                                                    \
-          gapped_load<EPT, GAP><<<g, b>>>(d_src, d_dst, N);                   \
-        },                                                                     \
-        N / (EPT * GAP * BLOCK),                                               \
-        (size_t)(N / (EPT * GAP * BLOCK)) * BLOCK * EPT * sizeof(float))
+  #define SWEEP_GAP_STORE(NAME, KERNEL, GAP, BYTES_MOVED)                     \
+    results.push_back(sweep(NAME, [&](int nb, int bs, int unroll,              \
+                                      int n, size_t bm) -> double {            \
+      return bench_one([&](int g, int b) {                                     \
+        DISPATCH_UNROLL_GAP(KERNEL, GAP, dim3(g), dim3(b),                     \
+                            (float*)d_dst, n);                                 \
+      }, nb, bs, bm);                                                          \
+    }, block_sizes, num_cus, N, BYTES_MOVED))
 
-  BENCH_GAP_LOAD(1, 2);
-  BENCH_GAP_LOAD(1, 4);
-  BENCH_GAP_LOAD(1, 32);
-  BENCH_GAP_LOAD(2, 2);
-  BENCH_GAP_LOAD(2, 4);
-  BENCH_GAP_LOAD(2, 32);
-  BENCH_GAP_LOAD(4, 2);
-  BENCH_GAP_LOAD(4, 4);
-  BENCH_GAP_LOAD(4, 32);
+  #define SWEEP_GAP_STORE4(NAME, KERNEL, GAP, BYTES_MOVED)                    \
+    results.push_back(sweep(NAME, [&](int nb, int bs, int unroll,              \
+                                      int n, size_t bm) -> double {            \
+      return bench_one([&](int g, int b) {                                     \
+        DISPATCH_UNROLL_GAP(KERNEL, GAP, dim3(g), dim3(b),                     \
+                            (float4*)d_dst, n);                                \
+      }, nb, bs, bm);                                                          \
+    }, block_sizes, num_cus, N / 4, BYTES_MOVED))
 
-  // ---- Coalesced stores ----
-  // Each thread writes EPT contiguous f32s.
-  #define BENCH_COAL_STORE(EPT)                                                \
-    run(#EPT "x f32 = " #EPT "*4B contiguous",                                \
-        [&](int g, int b) {                                                    \
-          coalesced_store<EPT><<<g, b>>>(d_dst, N);                            \
-        },                                                                     \
-        N / (EPT * BLOCK), bytes)
+  printf("Running benchmarks (sweeping block sizes and unroll factors)...\n\n");
 
-  BENCH_COAL_STORE(1);
-  BENCH_COAL_STORE(2);
-  BENCH_COAL_STORE(4);
-  BENCH_COAL_STORE(8);
-  BENCH_COAL_STORE(16);
+  // ==== COALESCED LOADS ====
+  SWEEP_COAL_LOAD("float   (b32)  load+reduce", const float,  coalesced_load_f32,   1);
+  SWEEP_COAL_LOAD("float2  (b64)  load+reduce", const float2, coalesced_load_f32x2, 2);
+  SWEEP_COAL_LOAD("float4  (b128) load+reduce", const float4, coalesced_load_f32x4, 4);
 
-  // ---- Gapped stores ----
-  // Each thread writes EPT f32s with GAP elements between each access.
-  #define BENCH_GAP_STORE(EPT, GAP)                                            \
-    run(#EPT "x f32 stride=" #GAP " (" #EPT "*4B/thread)",                    \
-        [&](int g, int b) {                                                    \
-          gapped_store<EPT, GAP><<<g, b>>>(d_dst, N);                         \
-        },                                                                     \
-        N / (EPT * GAP * BLOCK),                                               \
-        (size_t)(N / (EPT * GAP * BLOCK)) * BLOCK * EPT * sizeof(float))
+  // ==== GAPPED LOADS ====
+  SWEEP_GAP_LOAD("float  stride=2",  gapped_load_f32, 2,  (size_t)(N/2)*4);
+  SWEEP_GAP_LOAD("float  stride=4",  gapped_load_f32, 4,  (size_t)(N/4)*4);
+  SWEEP_GAP_LOAD("float  stride=32", gapped_load_f32, 32, (size_t)(N/32)*4);
+  SWEEP_GAP_LOAD4("float4 stride=2",  gapped_load_f32x4, 2,  (size_t)(N/2)*4);
+  SWEEP_GAP_LOAD4("float4 stride=4",  gapped_load_f32x4, 4,  (size_t)(N/4)*4);
+  SWEEP_GAP_LOAD4("float4 stride=32", gapped_load_f32x4, 32, (size_t)(N/32)*4);
 
-  BENCH_GAP_STORE(1, 2);
-  BENCH_GAP_STORE(1, 4);
-  BENCH_GAP_STORE(1, 32);
-  BENCH_GAP_STORE(2, 2);
-  BENCH_GAP_STORE(2, 4);
-  BENCH_GAP_STORE(2, 32);
-  BENCH_GAP_STORE(4, 2);
-  BENCH_GAP_STORE(4, 4);
-  BENCH_GAP_STORE(4, 32);
+  // ==== COALESCED STORES ====
+  SWEEP_COAL_STORE("float   (b32)  store iota", float,  coalesced_store_f32,   1);
+  SWEEP_COAL_STORE("float2  (b64)  store iota", float2, coalesced_store_f32x2, 2);
+  SWEEP_COAL_STORE("float4  (b128) store iota", float4, coalesced_store_f32x4, 4);
+
+  // ==== GAPPED STORES ====
+  SWEEP_GAP_STORE("float  stride=2",  gapped_store_f32, 2,  (size_t)(N/2)*4);
+  SWEEP_GAP_STORE("float  stride=4",  gapped_store_f32, 4,  (size_t)(N/4)*4);
+  SWEEP_GAP_STORE("float  stride=32", gapped_store_f32, 32, (size_t)(N/32)*4);
+  SWEEP_GAP_STORE4("float4 stride=2",  gapped_store_f32x4, 2,  (size_t)(N/2)*4);
+  SWEEP_GAP_STORE4("float4 stride=4",  gapped_store_f32x4, 4,  (size_t)(N/4)*4);
+  SWEEP_GAP_STORE4("float4 stride=32", gapped_store_f32x4, 32, (size_t)(N/32)*4);
 
   // ---- Print results ----
-  printf("\nElement type: f32 (4 bytes)\n");
-  printf("Buffer: %d MB (%dM floats)\n", (int)(bytes / (1024*1024)), N / (1024*1024));
-  printf("Block size: %d threads, Iterations: %d (median reported)\n\n", BLOCK, ITERS);
-
-  printf("%-40s %10s %10s %10s\n", "Kernel", "Median", "Min", "Max");
-  printf("%-40s %10s %10s %10s\n",
+  printf("%-40s %10s %8s %8s\n", "Kernel", "GB/s", "Block", "Unroll");
+  printf("%-40s %10s %8s %8s\n",
          "----------------------------------------",
-         "----------", "----------", "----------");
-  const char *prev_section = nullptr;
-  for (auto &r : results) {
-    const char *section = nullptr;
-    if (strstr(r.name, "contiguous") && !prev_section)
-      section = "COALESCED LOADS (contiguous f32s per thread)";
-    else if (strstr(r.name, "stride") && (!prev_section || strstr(prev_section, "COALESCED LOADS")))
-      section = "GAPPED LOADS (strided f32s per thread)";
-    else if (strstr(r.name, "contiguous") && strstr(prev_section, "GAPPED LOADS"))
-      section = "COALESCED STORES (contiguous f32s per thread)";
-    else if (strstr(r.name, "stride") && strstr(prev_section, "COALESCED STORES"))
-      section = "GAPPED STORES (strided f32s per thread)";
-    if (section) {
-      printf("\n  == %s ==\n", section);
-      prev_section = section;
+         "----------", "--------", "--------");
+
+  const char *sections[] = {
+    "COALESCED LOADS",
+    "GAPPED LOADS",
+    "COALESCED STORES",
+    "GAPPED STORES",
+  };
+  int counts[] = {3, 6, 3, 6};
+  int idx = 0;
+  for (int s = 0; s < 4; ++s) {
+    printf("\n  == %s ==\n", sections[s]);
+    for (int i = 0; i < counts[s]; ++i, ++idx) {
+      auto &r = results[idx];
+      printf("  %-38s %8.1f %8d %8d\n",
+             r.name, r.best_gb_per_sec, r.best_block, r.best_unroll);
     }
-    printf("  %-38s %8.1f %8.1f %8.1f\n",
-           r.name, r.median_gb_per_sec, r.min_gb_per_sec, r.max_gb_per_sec);
   }
   printf("\n");
 
