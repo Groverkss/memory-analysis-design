@@ -1,9 +1,0 @@
-coalesce_bench
-*.bc
-*.hipi
-*.o
-*.out
-*.out.resolution.txt
-*.s
-*.hipfb
-*_gfx*.txt
