@@ -1,5 +1,5 @@
 === Coalescing Benchmark Results ===
-Date:       2026-03-26 12:09:31 UTC
+Date:       2026-03-26 12:21:02 UTC
 Host:       tiny
 GPU:        AMD Radeon RX 9070 XT (gfx1201)
 ROCm:       6.4.2-120
@@ -11,37 +11,40 @@ CUs: 32, subgroup size: 32
 Block sizes: 128, 256
 Unroll factors: 1-8 (best selected automatically)
 
-Buffer: 2048 MB (512 M floats)
+Element type: f16 (2 bytes)
+Buffer: 2048 MB (1024 M f16 elements)
 Iterations: 50 per config (median), cache flushed between iterations
 
 Running benchmarks (sweeping block sizes and unroll factors)...
 
-Kernel                                         GB/s    Block   Unroll
----------------------------------------- ---------- -------- --------
+Kernel                                              GB/s    Block   Unroll
+--------------------------------------------- ---------- -------- --------
 
   == COALESCED LOADS ==
-  float   (b32)  load+reduce                616.8      128        4
-  float2  (b64)  load+reduce                616.9      128        4
-  float4  (b128) load+reduce                617.2      128        2
+  half    (1x f16 =  2B) -> b16                  617.3      128        8
+  half2   (2x f16 =  4B) -> b32                  616.9      128        4
+  half4   (4x f16 =  8B) -> b64                  616.8      128        4
+  half8   (8x f16 = 16B) -> b128                 617.0      128        2
 
   == GAPPED LOADS ==
-  float  stride=2                           308.5      128        2
-  float  stride=4                           154.3      128        2
-  float  stride=32                           19.3      128        1
-  float4 stride=2                           308.6      128        1
-  float4 stride=4                           154.2      128        1
-  float4 stride=32                           37.0      128        1
+  half   stride=2                                308.5      128        4
+  half   stride=4                                154.2      128        4
+  half   stride=32                                19.3      128        1
+  half8  stride=2                                308.5      128        1
+  half8  stride=4                                154.2      128        1
+  half8  stride=32                                37.0      128        1
 
   == COALESCED STORES ==
-  float   (b32)  store iota                 623.1      128        1
-  float2  (b64)  store iota                 611.7      128        1
-  float4  (b128) store iota                 621.4      128        1
+  half    (1x f16 =  2B) -> b16                  560.9      128        2
+  half2   (2x f16 =  4B) -> b32                  485.5      128        2
+  half4   (4x f16 =  8B) -> b64                  603.2      128        1
+  half8   (8x f16 = 16B) -> b128                 585.7      256        1
 
   == GAPPED STORES ==
-  float  stride=2                           125.3      128        1
-  float  stride=4                            62.6      128        1
-  float  stride=32                           31.6      128        4
-  float4 stride=2                           125.2      128        1
-  float4 stride=4                           153.4      256        2
-  float4 stride=32                           79.0      128        4
+  half   stride=2                                122.8      128        6
+  half   stride=4                                 62.3      128        5
+  half   stride=32                                19.1      256        1
+  half8  stride=2                                124.9      128        1
+  half8  stride=4                                151.4      256        2
+  half8  stride=32                                79.6      128        4
 
