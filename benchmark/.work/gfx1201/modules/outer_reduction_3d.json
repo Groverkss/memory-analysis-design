@@ -1,0 +1,16 @@
+{
+  "name": "outer_reduction_3d",
+  "inputs": [
+    {
+      "shape": "256x32x4096xf16",
+      "bytes": 67108864
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "32x4096xf16",
+      "bytes": 262144
+    }
+  ],
+  "bytes_moved": 67371008
+}

@@ -1,0 +1,16 @@
+{
+  "name": "cross_entropy_fused",
+  "inputs": [
+    {
+      "shape": "2048x32000xf16",
+      "bytes": 131072000
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "2048xf16",
+      "bytes": 4096
+    }
+  ],
+  "bytes_moved": 131076096
+}

@@ -1,0 +1,16 @@
+{
+  "name": "softmax_3d",
+  "inputs": [
+    {
+      "shape": "8x16x2048xf16",
+      "bytes": 524288
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "8x16x2048xf16",
+      "bytes": 524288
+    }
+  ],
+  "bytes_moved": 1048576
+}

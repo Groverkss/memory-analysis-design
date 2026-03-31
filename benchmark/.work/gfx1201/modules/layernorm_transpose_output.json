@@ -1,0 +1,20 @@
+{
+  "name": "layernorm_transpose_output",
+  "inputs": [
+    {
+      "shape": "2048x4096xf16",
+      "bytes": 16777216
+    },
+    {
+      "shape": "4096xf16",
+      "bytes": 8192
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4096x2048xf32",
+      "bytes": 33554432
+    }
+  ],
+  "bytes_moved": 50339840
+}

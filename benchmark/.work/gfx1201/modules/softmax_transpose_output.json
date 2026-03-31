@@ -1,0 +1,16 @@
+{
+  "name": "softmax_transpose_output",
+  "inputs": [
+    {
+      "shape": "1024x2048xf16",
+      "bytes": 4194304
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "2048x1024xf16",
+      "bytes": 4194304
+    }
+  ],
+  "bytes_moved": 8388608
+}

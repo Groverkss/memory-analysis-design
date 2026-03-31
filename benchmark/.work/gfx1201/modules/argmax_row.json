@@ -1,0 +1,16 @@
+{
+  "name": "argmax_row",
+  "inputs": [
+    {
+      "shape": "2048x32000xf32",
+      "bytes": 262144000
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "2048xi64",
+      "bytes": 16384
+    }
+  ],
+  "bytes_moved": 262160384
+}

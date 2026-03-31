@@ -1,0 +1,16 @@
+{
+  "name": "row_sum_unaligned",
+  "inputs": [
+    {
+      "shape": "1000x511xf16",
+      "bytes": 1022000
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "1000xf16",
+      "bytes": 2000
+    }
+  ],
+  "bytes_moved": 1024000
+}

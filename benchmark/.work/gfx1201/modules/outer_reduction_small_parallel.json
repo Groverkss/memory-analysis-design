@@ -1,0 +1,16 @@
+{
+  "name": "outer_reduction_small_parallel",
+  "inputs": [
+    {
+      "shape": "8192x64xf32",
+      "bytes": 2097152
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "64xf32",
+      "bytes": 256
+    }
+  ],
+  "bytes_moved": 2097408
+}

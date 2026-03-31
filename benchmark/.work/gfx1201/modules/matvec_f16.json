@@ -1,0 +1,20 @@
+{
+  "name": "matvec_f16",
+  "inputs": [
+    {
+      "shape": "4096x4096xf16",
+      "bytes": 33554432
+    },
+    {
+      "shape": "4096xf16",
+      "bytes": 8192
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4096xf16",
+      "bytes": 8192
+    }
+  ],
+  "bytes_moved": 33570816
+}

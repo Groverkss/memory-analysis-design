@@ -1,0 +1,16 @@
+{
+  "name": "softmax_medium",
+  "inputs": [
+    {
+      "shape": "2048x4096xf16",
+      "bytes": 16777216
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "2048x4096xf16",
+      "bytes": 16777216
+    }
+  ],
+  "bytes_moved": 33554432
+}

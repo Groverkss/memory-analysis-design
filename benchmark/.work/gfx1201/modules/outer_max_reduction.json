@@ -1,0 +1,16 @@
+{
+  "name": "outer_max_reduction",
+  "inputs": [
+    {
+      "shape": "2048x512xf32",
+      "bytes": 4194304
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "512xf32",
+      "bytes": 2048
+    }
+  ],
+  "bytes_moved": 4196352
+}

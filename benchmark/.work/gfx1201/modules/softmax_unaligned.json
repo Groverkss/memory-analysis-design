@@ -1,0 +1,16 @@
+{
+  "name": "softmax_unaligned",
+  "inputs": [
+    {
+      "shape": "1024x511xf16",
+      "bytes": 1046528
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "1024x511xf16",
+      "bytes": 1046528
+    }
+  ],
+  "bytes_moved": 2093056
+}

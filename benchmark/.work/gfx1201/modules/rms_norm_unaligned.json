@@ -1,0 +1,20 @@
+{
+  "name": "rms_norm_unaligned",
+  "inputs": [
+    {
+      "shape": "4096x768xf16",
+      "bytes": 6291456
+    },
+    {
+      "shape": "768xf16",
+      "bytes": 1536
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4096x768xf16",
+      "bytes": 6291456
+    }
+  ],
+  "bytes_moved": 12584448
+}

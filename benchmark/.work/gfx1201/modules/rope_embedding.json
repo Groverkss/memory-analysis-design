@@ -1,0 +1,24 @@
+{
+  "name": "rope_embedding",
+  "inputs": [
+    {
+      "shape": "4x2048x32x128xf16",
+      "bytes": 67108864
+    },
+    {
+      "shape": "2048x64xf16",
+      "bytes": 262144
+    },
+    {
+      "shape": "2048x64xf16",
+      "bytes": 262144
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4x2048x32x128xf16",
+      "bytes": 67108864
+    }
+  ],
+  "bytes_moved": 134742016
+}

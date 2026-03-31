@@ -1,0 +1,16 @@
+{
+  "name": "reduction_3d",
+  "inputs": [
+    {
+      "shape": "8x256x4096xf32",
+      "bytes": 33554432
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "8x4096xf32",
+      "bytes": 131072
+    }
+  ],
+  "bytes_moved": 33685504
+}

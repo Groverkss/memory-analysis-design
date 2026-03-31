@@ -1,0 +1,16 @@
+{
+  "name": "softmax_outer_dim",
+  "inputs": [
+    {
+      "shape": "4096x1024xf32",
+      "bytes": 16777216
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4096x1024xf32",
+      "bytes": 16777216
+    }
+  ],
+  "bytes_moved": 33554432
+}

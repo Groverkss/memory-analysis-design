@@ -1,0 +1,16 @@
+{
+  "name": "global_reduction",
+  "inputs": [
+    {
+      "shape": "16777216xf32",
+      "bytes": 67108864
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "f32",
+      "bytes": 4
+    }
+  ],
+  "bytes_moved": 67108868
+}

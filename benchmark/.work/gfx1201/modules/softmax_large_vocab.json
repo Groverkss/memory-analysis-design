@@ -1,0 +1,16 @@
+{
+  "name": "softmax_large_vocab",
+  "inputs": [
+    {
+      "shape": "4096x32000xf16",
+      "bytes": 262144000
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4096x32000xf16",
+      "bytes": 262144000
+    }
+  ],
+  "bytes_moved": 524288000
+}

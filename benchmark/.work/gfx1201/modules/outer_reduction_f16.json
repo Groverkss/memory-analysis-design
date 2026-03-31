@@ -1,0 +1,16 @@
+{
+  "name": "outer_reduction_f16",
+  "inputs": [
+    {
+      "shape": "4096x8192xf16",
+      "bytes": 67108864
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "8192xf16",
+      "bytes": 16384
+    }
+  ],
+  "bytes_moved": 67125248
+}

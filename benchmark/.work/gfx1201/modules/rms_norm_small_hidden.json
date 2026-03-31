@@ -1,0 +1,20 @@
+{
+  "name": "rms_norm_small_hidden",
+  "inputs": [
+    {
+      "shape": "8192x128xf16",
+      "bytes": 2097152
+    },
+    {
+      "shape": "128xf16",
+      "bytes": 256
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "8192x128xf16",
+      "bytes": 2097152
+    }
+  ],
+  "bytes_moved": 4194560
+}

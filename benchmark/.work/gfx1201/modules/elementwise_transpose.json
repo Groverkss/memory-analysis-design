@@ -1,0 +1,16 @@
+{
+  "name": "elementwise_transpose",
+  "inputs": [
+    {
+      "shape": "1024x4096xf16",
+      "bytes": 8388608
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4096x1024xf32",
+      "bytes": 16777216
+    }
+  ],
+  "bytes_moved": 25165824
+}

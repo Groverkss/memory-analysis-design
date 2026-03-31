@@ -1,0 +1,16 @@
+{
+  "name": "elementwise_tiny_batch",
+  "inputs": [
+    {
+      "shape": "1x65536xf16",
+      "bytes": 131072
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "1x65536xf16",
+      "bytes": 131072
+    }
+  ],
+  "bytes_moved": 262144
+}

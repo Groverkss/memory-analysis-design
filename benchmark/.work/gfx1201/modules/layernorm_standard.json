@@ -1,0 +1,24 @@
+{
+  "name": "layernorm_standard",
+  "inputs": [
+    {
+      "shape": "2048x4096xf16",
+      "bytes": 16777216
+    },
+    {
+      "shape": "4096xf16",
+      "bytes": 8192
+    },
+    {
+      "shape": "4096xf16",
+      "bytes": 8192
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "2048x4096xf16",
+      "bytes": 16777216
+    }
+  ],
+  "bytes_moved": 33570816
+}

@@ -1,0 +1,24 @@
+{
+  "name": "layernorm_small_hidden",
+  "inputs": [
+    {
+      "shape": "32768x64xf32",
+      "bytes": 8388608
+    },
+    {
+      "shape": "64xf32",
+      "bytes": 256
+    },
+    {
+      "shape": "64xf32",
+      "bytes": 256
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "32768x64xf32",
+      "bytes": 8388608
+    }
+  ],
+  "bytes_moved": 16777728
+}

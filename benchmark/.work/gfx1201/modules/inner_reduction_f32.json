@@ -1,0 +1,16 @@
+{
+  "name": "inner_reduction_f32",
+  "inputs": [
+    {
+      "shape": "8192x256xf32",
+      "bytes": 8388608
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "8192xf32",
+      "bytes": 32768
+    }
+  ],
+  "bytes_moved": 8421376
+}

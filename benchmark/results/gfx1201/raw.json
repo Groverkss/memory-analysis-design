@@ -1,0 +1,2 @@
+[
+  {"name": "argmax_row", "time_ns": 5, "bytes_moved": 262160384, "bw_gbps": 52432076.8, "pct_peak": 11787787}

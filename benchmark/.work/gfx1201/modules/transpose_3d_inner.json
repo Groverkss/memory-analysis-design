@@ -1,0 +1,16 @@
+{
+  "name": "transpose_3d_inner",
+  "inputs": [
+    {
+      "shape": "64x512x1024xf32",
+      "bytes": 134217728
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "64x1024x512xf32",
+      "bytes": 134217728
+    }
+  ],
+  "bytes_moved": 268435456
+}

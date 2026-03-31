@@ -1,0 +1,16 @@
+{
+  "name": "softmax_small",
+  "inputs": [
+    {
+      "shape": "512x128xf32",
+      "bytes": 262144
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "512x128xf32",
+      "bytes": 262144
+    }
+  ],
+  "bytes_moved": 524288
+}

@@ -1,0 +1,16 @@
+{
+  "name": "transpose_4d_bsnh_to_bnsh",
+  "inputs": [
+    {
+      "shape": "4x2048x32x128xf16",
+      "bytes": 67108864
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4x32x2048x128xf16",
+      "bytes": 67108864
+    }
+  ],
+  "bytes_moved": 134217728
+}

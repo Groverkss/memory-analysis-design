@@ -1,0 +1,20 @@
+{
+  "name": "elementwise_3d_broadcast",
+  "inputs": [
+    {
+      "shape": "8x512x4096xf16",
+      "bytes": 33554432
+    },
+    {
+      "shape": "4096xf16",
+      "bytes": 8192
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "8x512x4096xf16",
+      "bytes": 33554432
+    }
+  ],
+  "bytes_moved": 67117056
+}

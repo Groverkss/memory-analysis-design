@@ -1,0 +1,24 @@
+{
+  "name": "layernorm_unaligned_3d",
+  "inputs": [
+    {
+      "shape": "16x100x511xf16",
+      "bytes": 1635200
+    },
+    {
+      "shape": "511xf16",
+      "bytes": 1022
+    },
+    {
+      "shape": "511xf16",
+      "bytes": 1022
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "16x100x511xf16",
+      "bytes": 1635200
+    }
+  ],
+  "bytes_moved": 3272444
+}

@@ -1,0 +1,16 @@
+{
+  "name": "elementwise_unaligned",
+  "inputs": [
+    {
+      "shape": "1000x3xf32",
+      "bytes": 12000
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "1000x3xf32",
+      "bytes": 12000
+    }
+  ],
+  "bytes_moved": 24000
+}

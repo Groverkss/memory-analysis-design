@@ -1,0 +1,20 @@
+{
+  "name": "swiglu_fused",
+  "inputs": [
+    {
+      "shape": "2048x4096xf16",
+      "bytes": 16777216
+    },
+    {
+      "shape": "2048x4096xf16",
+      "bytes": 16777216
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "2048x4096xf16",
+      "bytes": 16777216
+    }
+  ],
+  "bytes_moved": 50331648
+}

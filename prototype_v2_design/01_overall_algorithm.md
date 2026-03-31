@@ -4,7 +4,7 @@
 
 - Tensor-centric parallelism via union-find dimension groups
 - No dynamic shape special-casing (resolvedSize uniformly)
-- Per-operand coalescing targets (subgroupSize * 128/elemBits)
+- Per-operand coalescing targets (subgroupSize * vectorWidth)
 - Coalescing walk: innermost-to-outermost, reduction dims contribute for
   free, stop when next dim is non-contiguous
 - HeuristicSeeds for tunability
@@ -12,53 +12,107 @@
 
 ## What v1 got wrong (fix)
 
-1. **Budget conflates parallel and sequential work** -- drops coalescing on
-   elementwise transpose when it shouldn't
+1. **Budget drops coalescing entirely** -- should progressively reduce
+   vectorWidth instead, since benchmarks show all vector widths achieve
+   the same load bandwidth
 2. **No lane_basis/subgroup_basis production** -- analysis only, no config
    emission
 3. **Single subgroup assumed** -- no multi-subgroup scaling
 4. **Coalescing conflicts -> drop constraints** -- should use shared memory
    promotion instead
 5. **Broadcast cost computed but unused** -- coarsening was removed
+6. **Budget conflates parallel and sequential work** -- over-counts
+   elementwise ops
+
+## Key benchmark finding: vector width doesn't affect coalescing bandwidth
+
+From the HIP coalescing benchmarks on RDNA4 (gfx1201) and CDNA3 (gfx942):
+
+```
+RDNA4 loads:   b16=611, b32=612, b64=612, b128=612 GB/s  (identical)
+MI300X loads:  b16=3945, b32=3979, b64=4015, b128=3991 GB/s  (identical)
+```
+
+The hardware coalescer merges all requests within the same cache lines
+regardless of per-thread vector width. Wider vectors reduce instruction
+count but don't improve memory throughput.
+
+For stores, wider vectors help with cache line contention:
+
+```
+RDNA4 stores:  b16=322, b32=532, b64=599, b128=600 GB/s  (gradual)
+MI300X stores: b16=4739, b32=4846, b64=4873, b128=4918 GB/s  (mild)
+```
+
+**Implication:** Reducing vectorWidth from 8 to 4 (128-bit to 64-bit for
+f16) is nearly free for loads and only mildly costly for stores. Much
+better than dropping coalescing entirely.
 
 ## V2 Stages
 
 ```
-Stage 1: Parallelism Analysis        -> dimension groups, resolved sizes
-Stage 2: Workgroup Tiling            -> per-group WG tiles, WG count
-Stage 3: Per-Thread Work Budgeting   -> validate/adjust tiles, flag promotions
-Stage 4: Thread & Subgroup Layout    -> lane_basis, subgroup_basis, promote_operands
-Stage 5: Per-Op Config Emission      -> lowering_config per op
+Stage 1: Parallelism Analysis              -> dimension groups, resolved sizes
+Stage 2: Coalescing + Tiling               -> per-operand min tiles, WG tiles, subgroups, per-op tiles
+Stage 3: Budget Check                      -> progressively reduce vectorWidths if needed
+Stage 4: Config Emission                   -> lowering_config per op
 ```
 
 ## Flow Diagram
+
+input: tensor<1024x1024> // coalesce(vector_width)
 
 ```
 analyzeParallelism()
         |
         v
-computeWorkgroupTiling()  <-- coalescing constraints + broadcast cost
-        |
-        v
-checkPerThreadBudget()    <-- detect conflicts, flag promotions
-        |
-        v
-buildThreadLayout()       <-- lane_basis, subgroup_basis
-        |
-        v
-emitPerOpConfigs()        <-- lowering_config per op
+  +---> computeCoalescingConstraints()     2a: per-operand min tiles
+  |             |
+  |     setWorkgroupTiles()                2b: WG tiles = parallel min tiles
+  |             |
+  |     scaleSubgroups()                   2c: subgroupsPerWG from occupancy
+  |             |
+  |     growTilesWithSubgroups()           2d: increase per-operand tiles
+  |             |
+  |     resolvePerOpTiles()               2e: max across operands per iter dim
+  |             |
+  |             v
+  +---- checkBudget()                      3: if over budget or under-occupied,
+                |                              halve worst vectorWidth, retry
+                v
+        emitPerOpConfigs()                 4: lowering_config per op
 ```
 
-No outer retry loop. Conflicts are resolved by promotion in Stage 3, not by
-iteratively dropping constraints.
+## Invariants
+
+**After Stage 1:**
+- Dimension groups classified as parallel or reduction.
+- Each group has a resolvedSize (static or upper-bound).
+
+**After Stage 2:**
+- Each operand has min tile sizes per operand dim (from coalescing).
+- Shared parallel dims have WG tiles = their min tile from coalescing.
+- **No threads or subgroups distribute along shared parallel dims.**
+  If you'd want distribution there, it should have been more WGs instead.
+- Thread distribution is fully determined by the coalescing constraints:
+  element_tile = vectorWidth on contiguous dim, threads fill reduction
+  dims from innermost outward.
+- Subgroups extend the tile from innermost outward (skip parallel dims).
+- Per-op tiles are resolved from per-operand tiles (max across operands).
+
+**After Stage 3:**
+- Per-thread work is within budget for all ops.
+- vectorWidths may have been reduced (never increased).
+- numWGs >= some reasonable fraction of targetOccupancy.
 
 ---
 
 ## Stage 1: Parallelism Analysis
 
-Unchanged from v1. This is solid.
+Unchanged from v1.
 
 **Input:** All linalg ops in the dispatch.
+
+TODO: Replace linalg-specific analysis with IndexingMapOpInterface.
 
 **Steps:**
 
@@ -78,246 +132,319 @@ with isParallelizable, resolvedSize).
 
 ---
 
-## Stage 2: Workgroup Tiling
+## Stage 2: Coalescing + Tiling
 
-**Input:** ParallelismAnalysis, HeuristicSeeds.
+**Input:** ParallelismAnalysis, HeuristicSeeds, per-operand vectorWidths.
 
-**Goal:** Decide how to tile parallel groups across workgroups.
-
-### 2a. Per-operand coalescing constraints
+### 2a. Per-operand coalescing constraints (min tile sizes)
 
 For each global memory operand (dispatch inputs + stored outputs):
 
-1. **Check if coalescing is possible.** Coalescing requires the operand's
-   indexing map to be a projected permutation and the memory layout to have
-   a known contiguous innermost dimension. If not, skip this operand — no
-   coalescing constraint generated.
+1. **Skip small operands.** If total size < significantOperandThreshold
+   (seed, default 1KB), skip. Small operands fit in cache.
 
-2. **Compute coalescingTarget** = subgroupSize * (128 / elemBits).
+2. **Check if coalescing is possible.** Requires projected permutation
+   indexing map and known contiguous innermost dim. If not, skip.
 
-3. **Walk operand dims innermost-to-outermost.** For each operand dim:
-   - Map the operand dim to its dimension group.
-   - The "used" amount from this dim = min(group.resolvedSize, remaining).
-   - Subtract the used amount from remaining.
-   - Record: this operand dim needs a minimum tile of
-     nextPowerOf2(used amount).
-   - If remaining <= 0: stop, coalescing satisfied.
-   - If the next dim's stride would make it non-contiguous with this dim
-     (i.e., this dim's tile < this dim's full size, creating a gap), stop.
-     Coalescing from outer dims is not possible.
+3. **Compute coalescingTarget:**
 
-4. **Output per constraint:** `{operand, [(operandDim, minTile)...]}`.
-   These constraints are on *operand dimensions*, not on iteration space
-   dimensions or dimension groups. The mapping to groups/iteration space
-   happens later.
+   ```
+   coalescingTarget = subgroupSize * vectorWidth
+   ```
 
-Note: parallel and reduction dims are not treated differently here. A
-constraint just says "this operand dimension needs tile >= X". What that
-*costs* is determined later:
-- A parallel dim constraint costs parallelism (larger WG tile).
-- A reduction dim constraint costs a partial_reduction tile minimum.
+   vectorWidth = maxLoadBits / elemBits (e.g., 8 for f16). May be smaller
+   on retry from Stage 3.
 
-### 2b. Map constraints to WG tiles
+4. **Walk operand dims innermost-to-outermost.** For each operand dim:
+   - Map to its dimension group.
+   - used = min(group.resolvedSize, remaining).
+   - Record: this operand dim needs minTile = nextPowerOf2(used).
+   - remaining -= used. If remaining <= 0: stop.
+   - If next dim is non-contiguous (this dim's tile < full size): stop.
 
-For each parallel dimension group G:
+5. **Output per operand:**
+   `{operand, vectorWidth, [(operandDim, minTile)...]}`.
 
-- Collect all coalescing constraints that touch G (by mapping each
-  constraint's operand dims to their dimension groups).
-- wgTile[G] = max of all constraint minTiles that map to G.
+The min tiles encode how the coalescingTarget is split across dims:
+- Contiguous dim: vectorWidth (element_tile per thread).
+- Next dims inward: thread distribution (subgroupSize fills here).
+- Parallel dims get small min tiles (just vectorWidth if innermost).
+- Reduction dims absorb the remaining target for free.
 
-This is where the max across operands happens — not in 2a.
+### 2b. Workgroup tile sizes
 
-For reduction groups: constraints are noted but don't affect WG tiling.
-They flow to Stage 3 as partial_reduction tile minimums.
+**WG tiles for shared parallel dims = their min tiles from coalescing.**
 
-### 2c. Dimension interactions (broadcast cost)
-
+```
 For each parallel group G:
+  wgTile[G] = max of all operand min tiles that map to G
+```
 
-- broadcastCost(G) = total elements of operands that do NOT have a dim
-  in G.
+That's it. No further heuristics for WG tile sizes. Reduction groups
+are not tiled across workgroups (wgTile = 0).
 
-- This informs coarsening: tiling G aggressively wastes bandwidth on
-  broadcast operands.
+```
+numWGs = product(resolvedSize / wgTile) for all parallel groups
+```
 
-### 2d. WG count, coarsening, and subgroup scaling
+### 2c. Subgroup scaling
 
-**Compute initial WG count:**
+Determine subgroupsPerWG from occupancy:
 
-- numWGs = product(resolvedSize / wgTile) for all parallel groups.
+```
+subgroupsPerWG = 1
+while numWGs * subgroupsPerWG < targetOccupancy:
+  subgroupsPerWG *= 2
+  if subgroupsPerWG * subgroupSize > maxWorkgroupSize:
+    subgroupsPerWG /= 2; break
+```
 
-**Coarsening (if too many WGs):**
+### 2d. Grow per-operand tiles with subgroups
 
-- Coarsening packs multiple "rows" of work into a single WG along
-  parallel groups.
-- Cap: no parallel group's wgTile may exceed
-  maxParallelRowsPerWG * coalescing minimum for that group (seed,
-  default 8). This prevents a single WG from processing a huge number
-  of independent rows.
-- Preference order for which group to coarsen:
-  1. Groups NOT critical for coalescing (no constraint touches them).
-  2. Among those, prefer groups with high broadcast cost.
-- Double the tile of the best group, repeat until numWGs <=
-  coarsenThreshold * targetOccupancy or all groups are at their cap.
+The coalescing walk (2a) gives min tiles assuming 1 subgroup (just
+subgroupSize threads). With multiple subgroups, we can grow the tiles.
 
-**Subgroup scaling (if too few WGs):**
+For each operand, distribute subgroups from innermost coalescing dim
+outward, **skipping shared parallel dims** (those are WG-tiled, not
+distributed within the WG):
 
-- subgroupsPerWG = 1.
-- While numWGs * subgroupsPerWG < targetOccupancy:
-  subgroupsPerWG *= 2.
-- Cap at maxWorkgroupSize / subgroupSize.
+```
+remaining_subgroups = subgroupsPerWG
+for dim in operand coalescing order (innermost first):
+  group = findGroup(operand, dim)
+  if group.isParallelizable:
+    continue  // skip shared parallel dims
+  // Grow this dim's tile by assigning subgroups
+  dimHeadroom = group.resolvedSize / currentTile[dim]
+  subgroupsHere = min(remaining_subgroups, dimHeadroom)
+  currentTile[dim] *= subgroupsHere
+  remaining_subgroups /= subgroupsHere
+  if remaining_subgroups <= 1: break
+```
 
-**Output:** `WorkgroupTiling` -- groupTiles, numWGs, subgroupsPerWG,
-perOperandConstraints, broadcastCosts.
+### 2e. Resolve per-op tile sizes
 
----
+Each operand has per-dim tile sizes. Map these to iteration space through
+indexing maps, then resolve across operands:
 
-## Stage 3: Per-Thread Work Budgeting
-
-**Input:** ParallelismAnalysis, WorkgroupTiling (including per-operand
-constraints), HeuristicSeeds.
-
-**Goal:** Validate that per-thread work is reasonable. If not, resolve by
-adjusting tiles or flagging shared memory promotion. This replaces v1's
-broken per-WG budget check.
-
-### Key v1 fix: separate elementwise from reduction work
-
-- For a **reduction** op: per-thread sequential work =
-  product(reduction tiles). This bounds how many accumulation iterations
-  each thread does.
-
-- For an **elementwise** op: work is distributed across all threads.
-  Per-thread work = product(all tiles) / numThreads. Much more permissive.
-
-### 3a. Compute reduction tiles from constraints
-
-For each reduction dimension group R:
-
-- Collect coalescing constraints from 2a that map to R.
-- reductionTile[R] = max of those constraint minTiles.
-- This is the minimum partial_reduction tile needed for coalescing on
-  operands that have R as an innermost dim.
-
-### 3b. Compute per-op per-thread work
-
+```
 For each compute op:
+  For each iteration dim d:
+    opTile[d] = 1
+    For each operand of this op:
+      operandDim = indexingMap.inverse(d)
+      if operandDim exists and has a tile:
+        opTile[d] = max(opTile[d], operandTile[operandDim])
+```
 
-- Compute tiles: parallel tiles from WG tiling (Stage 2b), reduction
-  tiles from 3a.
+For parallel dims: opTile = wgTile (from 2b).
+For reduction dims: opTile = max across operands' grown tiles (from 2d).
 
-- Classify op: has reduction dims -> reduction budget; all parallel ->
-  elementwise budget.
+These per-op tiles become the partial_reduction / serial tile sizes.
 
-- Reduction budget: `reductionWork = product(reduction_tiles)`.
-  Target: <= maxReductionIterationsPerThread (seed, e.g., 1024).
-
-- Elementwise budget:
-  `elemWork = product(all_tiles) / (subgroupsPerWG * subgroupSize)`.
-  Target: <= maxElementsPerThread (seed, e.g., 4096).
-
-### 3c. Detect coalescing conflicts
-
-- Two operands conflict when they need different parallel groups coalesced
-  (e.g., input wants P1 innermost, output wants P0 innermost).
-
-- v1 dropped constraints. v2: flag the non-dominant operand for shared
-  memory promotion (promote_operands).
-
-- Only drop constraints when promotion isn't viable (shared memory budget
-  exceeded).
-
-### 3d. If over budget
-
-- For reduction ops over budget: reduce the largest reduction tile (fewer
-  serial iterations per thread).
-
-- For elementwise ops over budget: this is rare since the budget is
-  permissive; if it happens, coarsen WG tiles.
-
-- For coalescing conflicts: resolve via promotion, not by dropping.
-
-**Output:** `BudgetResult` -- adjusted reduction tiles per op,
-promote_operands set, any dropped constraints.
+**Output:** Per-op tile sizes, per-operand coalescing configs (vectorWidth
++ order + min tiles), numWGs, subgroupsPerWG.
 
 ---
 
-## Stage 4: Thread & Subgroup Layout
+## Stage 3: Budget Check with Progressive VectorWidth Reduction
 
-**Input:** ParallelismAnalysis, WorkgroupTiling, BudgetResult,
-HeuristicSeeds.
+**Input:** Stage 2 output, HeuristicSeeds.
 
-**Goal:** Produce lane_basis and subgroup_basis that achieve coalesced
-access for the dominant operand, and mark operands that need promotion.
+**Goal:** Ensure per-thread work is reasonable and occupancy is adequate.
 
-### 4a. Determine dominant operand
+### 3a. Compute per-op per-thread work
 
-The dominant operand is the largest per-WG global memory operand for the
-dispatch.
+```
+For each compute op:
+  perThreadWork = product(opTiles) / (subgroupSize * subgroupsPerWG)
+```
 
-### 4b. Build lane_basis
+No reduction/elementwise distinction needed.
 
-From the dominant operand's memory layout:
+### 3b. Check triggers
 
-- Walk dominant operand dims innermost-to-outermost.
-- Map each operand dim -> iteration dim via indexing map.
-- Assign threads: innermost dim gets vectorWidth elements per thread, fill
-  subgroupSize threads from innermost outward.
-- Reduction dims in the thread distribution -> cooperative shuffle
-  reduction.
-- Parallel dims in the thread distribution -> independent work.
+Reduce vectorWidth when either trigger fires:
 
-### 4c. Build subgroup_basis
+```
+(a) perThreadWork > maxElementsPerThread     (over budget)
+(b) numWGs < targetOccupancy                 (under-occupied)
+```
 
-- Subgroups extend the thread distribution along the same dimensions.
-- If multiple subgroups: place them along the coalescing dimension
-  (increases per-WG bandwidth without changing the coalescing pattern).
+### 3c. If triggered: reduce vectorWidth
 
-### 4d. Mark promote_operands
+1. **Score each active constraint** by how much halving its vectorWidth
+   would improve the triggered metric.
 
-- Operands whose coalescing layout conflicts with the lane_basis get
-  promote_operands annotation.
-- ConfigureTensorLayouts will insert shared memory conversions for these.
+2. **Halve the highest-scoring constraint's vectorWidth.**
+   (e.g., f16: 8 -> 4 -> 2 -> 1)
 
-**Output:** `ThreadLayout` -- lane_basis, subgroup_basis,
-promote_operands, vectorWidth per op.
+3. **Go back to Stage 2** with updated vectorWidths. Recompute everything.
+
+4. **Repeat** until both triggers are satisfied or all vectorWidths = 1.
+
+5. **Last resort:** Drop constraint entirely (vectorWidth below 1). Rare.
+
+### 3d. Coalescing conflicts
+
+Two operands conflict when they need different dims coalesced. Both
+keep their coalescing specs. VectorDistribute resolves by inserting
+shared memory copies for the operand that doesn't match the chosen
+iteration-space layout.
+
+**Output:** Final per-operand vectorWidths, final per-op tile sizes.
 
 ---
 
-## Stage 5: Per-Op Config Emission
+## Stage 4: Config Emission
 
 **Input:** All previous results.
 
-**Goal:** Produce a `lowering_config` for each compute op that needs one.
+**Goal:** Produce a `lowering_config` for each compute op.
 
-### 5a. Which ops get configs
+### 4a. Which ops get configs
 
-- Reduction ops: always get a config.
-- Elementwise ops with broadcast inputs or non-trivial output maps: get
-  a config.
-- Simple elementwise fuseable into a reduction's tile loop: no config
-  (fused).
+- Reduction ops: always.
+- Elementwise ops with broadcast inputs or non-trivial output maps: yes.
+- Simple elementwise fuseable into a reduction's tile loop: no (fused).
 
-### 5b. For each op with a config
+### 4b. For each op with a config
 
-- **workgroup**: parallel dim tiles from Stage 2 groupTiles, mapped
-  through op's indexing map. Reduction dims = 0.
+- **workgroup**: parallel dim tiles from 2b. Reduction dims = 0.
 
-- **partial_reduction** (reduction ops): reduction tiles from Stage 3a,
-  mapped through op's indexing map. Parallel dims = 0.
+- **partial_reduction** (reduction ops): reduction tiles from 2e.
+  Parallel dims = 0.
 
-- **serial** (elementwise ops): reduction dim sizes (these are serial
-  loops). Parallel dims = 0.
+- **serial** (elementwise ops): reduction dim sizes. Parallel dims = 0.
 
-- **thread**: vectorWidth on the innermost coalescing dim. 1 on other
-  distributed dims. 0 elsewhere.
+- **thread** (element_tile): vectorWidth on innermost coalescing dim.
+  1 on other distributed dims. 0 elsewhere.
 
-- **lane_basis**: from Stage 4, projected to this op's iteration space.
+- **lane_basis**: derived from the per-operand coalescing config of
+  the largest operand, projected to iteration space. Threads fill
+  from innermost coalescing dim outward, skipping parallel dims.
 
-- **subgroup_basis**: from Stage 4, projected to this op's iteration
-  space.
+- **subgroup_basis**: same derivation, for the subgroup level.
 
-- **promote_operands**: from Stage 3/4, indices of operands needing
-  shared memory.
+- **operand_configs**: per-operand coalescing specs (vectorWidth, order,
+  min tiles). ConfigureTensorLayouts uses these to set per-operand
+  NestedLayoutAttrs. VectorDistribute inserts shared memory copies
+  where layouts disagree.
+
+TODO: Define `operand_config` attribute format in IREEGPUAttrDefs.td.
 
 **Output:** `lowering_config` attribute attached to each op.
+
+---
+
+## Worked Examples
+
+### Innermost Reduction: 1024x4096 f16
+
+```
+Groups: P0=1024 (parallel), R0=4096 (reduction)
+
+2a: input <P0 x R0>: contiguous=R0. target=512.
+    R0 (reduction): 4096 >= 512. Done.
+    min tiles: [P0=1, R0=512]. vectorWidth=8 on R0.
+
+2b: wgTile[P0] = 1 (no parallel constraint). numWGs = 1024.
+
+2c: 1024 WGs, target=1216. subgroupsPerWG = 2.
+
+2d: Grow with 2 subgroups (skip P0, grow R0):
+    input: R0 = 512 * 2 = 1024.
+
+2e: reduce op tiles: [P0=1, R0=1024].
+    perThreadWork = 1 * 1024 / 128 = 8. Well within budget.
+
+Config: workgroup=[1, 0], partial_reduction=[0, 1024], thread=[0, 8]
+Thread distribution: 64 threads on R0 per subgroup, 2 subgroups on R0.
+```
+
+### Outermost Reduction: 4096x1024 f16
+
+```
+Groups: P0=1024 (parallel), R0=4096 (reduction)
+
+2a: input <R0 x P0>: contiguous=P0. target=512.
+    P0 (parallel): min=8 (vectorWidth). remaining=512/8=64.
+    R0 (reduction): 4096 >= 64. Done.
+    min tiles: [R0=64, P0=8].
+
+2b: wgTile[P0] = 8. numWGs = 1024/8 = 128.
+
+2c: 128 WGs, target=1216. subgroupsPerWG = 16 (128*16=2048).
+    But 16*64=1024=maxWG. subgroupsPerWG = 16.
+
+2d: Grow with 16 subgroups (skip P0, grow R0):
+    input: R0 = 64 * 16 = 1024.
+
+2e: reduce op tiles: [R0=1024, P0=8].
+    perThreadWork = 1024 * 8 / 1024 = 8. Within budget.
+
+Config: workgroup=[0, 8], partial_reduction=[1024, 0], thread=[1, 8]
+128 WGs, 1024 threads each. 64 threads on R0 per subgroup, vec8 on P0.
+```
+
+### Matvec: 8x1024 @ 1024x1024 f16
+
+```
+Groups: P0=M=8, P1=N=1024, R0=K=1024
+
+2a: lhs <P0 x R0>: contiguous=R0. target=512.
+    R0 (reduction): 1024 >= 512. Done.
+    min tiles: [P0=1, R0=512].
+
+    rhs <R0 x P1>: contiguous=P1. target=512.
+    P1 (parallel): min=8 (vectorWidth). remaining=64.
+    R0 (reduction): 1024 >= 64. Done.
+    min tiles: [R0=64, P1=8].
+
+2b: wgTile[P0]=1, wgTile[P1]=8. numWGs = 8 * 128 = 1024.
+
+2c: 1024 WGs, target=1216. subgroupsPerWG = 2.
+
+2d: Grow with 2 subgroups (skip P0, P1; grow R0):
+    lhs: R0 = 512 * 2 = 1024.
+    rhs: R0 = 64 * 2 = 128.
+
+2e: contraction op tiles (M, N, K):
+    From lhs (M,K): M=1, K=1024.
+    From rhs (K,N): K=128, N=8.
+    Resolve: M=1, N=8, K=max(1024,128)=1024.
+    perThreadWork = 1 * 8 * 1024 / 128 = 64. Within budget.
+
+Config: workgroup=[1, 8, 0], partial_reduction=[0, 0, 1024], thread=[0, 8, 1]
+1024 WGs, 128 threads each.
+lhs layout: vec8 on K, 64 threads on K. Coalesced along K.
+rhs layout: vec8 on N, 64 threads on K. Stride=8*2=16B. Cache-coalesced.
+Layouts conflict -> VectorDistribute inserts shmem for one operand.
+```
+
+### Elementwise: 1024x4096 f16
+
+```
+Groups: P0=1024, P1=4096 (both parallel)
+
+2a: input <P0 x P1>: contiguous=P1. target=512.
+    P1 (parallel): min=512 (no reduction dims to fill the rest).
+    min tiles: [P0=1, P1=512].
+
+2b: wgTile[P0]=1, wgTile[P1]=512. numWGs = 1024 * 8 = 8192.
+
+2c: 8192 >> 1216. subgroupsPerWG = 1.
+
+2d: No reduction dims to grow. Tiles stay at [1, 512].
+
+2e: elementwise op tiles: [P0=1, P1=512].
+    perThreadWork = 1 * 512 / 64 = 8. Within budget.
+
+Config: workgroup=[1, 512], serial=[0, 0], thread=[0, 8]
+8192 WGs, 64 threads each. Threads along P1 (coalesced). Standard.
+```
+
+Note: for elementwise, there are no reduction dims, so the full
+coalescingTarget must come from parallel dims. The parallel dim gets
+the full target (512, not weakened to vectorWidth). The weakening only
+happens when reduction dims can absorb the remaining target.

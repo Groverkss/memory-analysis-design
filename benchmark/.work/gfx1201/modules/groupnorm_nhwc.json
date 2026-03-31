@@ -1,0 +1,24 @@
+{
+  "name": "groupnorm_nhwc",
+  "inputs": [
+    {
+      "shape": "4x8x8x32x32xf32",
+      "bytes": 1048576
+    },
+    {
+      "shape": "8x8xf32",
+      "bytes": 256
+    },
+    {
+      "shape": "8x8xf32",
+      "bytes": 256
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4x8x8x32x32xf32",
+      "bytes": 1048576
+    }
+  ],
+  "bytes_moved": 2097664
+}

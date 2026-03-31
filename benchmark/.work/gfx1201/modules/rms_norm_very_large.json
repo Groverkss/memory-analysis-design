@@ -1,0 +1,20 @@
+{
+  "name": "rms_norm_very_large",
+  "inputs": [
+    {
+      "shape": "64x65536xf16",
+      "bytes": 8388608
+    },
+    {
+      "shape": "65536xf16",
+      "bytes": 131072
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "64x65536xf16",
+      "bytes": 8388608
+    }
+  ],
+  "bytes_moved": 16908288
+}

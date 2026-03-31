@@ -1,0 +1,20 @@
+{
+  "name": "outer_reduction_welford",
+  "inputs": [
+    {
+      "shape": "256x1024xf16",
+      "bytes": 524288
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "1024xf32",
+      "bytes": 4096
+    },
+    {
+      "shape": "1024xf32",
+      "bytes": 4096
+    }
+  ],
+  "bytes_moved": 532480
+}

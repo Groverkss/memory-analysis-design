@@ -1,0 +1,20 @@
+{
+  "name": "elementwise_mixed_precision",
+  "inputs": [
+    {
+      "shape": "4096x4096xf8E4M3FNUZ",
+      "bytes": 16777216
+    },
+    {
+      "shape": "128x128xf32",
+      "bytes": 65536
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "4096x4096xf16",
+      "bytes": 33554432
+    }
+  ],
+  "bytes_moved": 50397184
+}

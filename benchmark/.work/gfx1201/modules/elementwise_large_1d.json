@@ -1,0 +1,16 @@
+{
+  "name": "elementwise_large_1d",
+  "inputs": [
+    {
+      "shape": "16777216xf16",
+      "bytes": 33554432
+    }
+  ],
+  "outputs": [
+    {
+      "shape": "16777216xf16",
+      "bytes": 33554432
+    }
+  ],
+  "bytes_moved": 67108864
+}
